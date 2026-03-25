@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from itertools import compress
 from types import UnionType
 from typing import Any, Callable, Dict, Generic, List, Optional, Tuple, TypeVar, Union, cast, get_args
+from copy import deepcopy
 
 import dash
 import plotly
@@ -42,6 +43,7 @@ from dash import (  # lgtm [py/unused-import]; noqa: F401
     page_registry,  # noqa: F401
     register_page,  # noqa: F401
     set_props,  # noqa: F401
+    stringify_id
 )
 from dash.dependencies import DashDependency
 from dash.exceptions import PreventUpdate
@@ -801,33 +803,53 @@ class CycleBreakerTransform(StatefulDashTransform):
 
     def apply(self, callbacks, clientside_callbacks):
         cycle_inputs = {}
+        cycle_inputs_ids = {}
         # Update inputs.
         for c in callbacks + clientside_callbacks:
             for i in c.inputs:
                 if isinstance(i, CycleBreakerInput):
                     cid = self._cycle_break_id(i)
+                    cid_str = stringify_id(cid)
                     cycle_inputs[cid] = (i.component_id, i.component_property)
+                    cycle_inputs_ids[cid_str] = cid
                     i.component_id = cid
                     i.component_property = "dst"
         # Construct components.
-        self.components = [CycleBreaker(id=cid) for cid in cycle_inputs]
+        for cid in cycle_inputs_ids.values():
+            # If this is a dict and has a pattern match we cant auto add the CycleBreaker,
+            # it must be added manually on each instance
+            # It might be nice to check the layout for this but I think its too early here
+            if isinstance(cid, dict) and {MATCH, ALL, ALLSMALLER} & set(cid.values()):
+                pass
+            # Otherwise, we can automatically add the CycleBreaker
+            else:
+                self.components.append(CycleBreaker(id=cid))
         # Construct callbacks.
         f = "function(x){return x;}"
         cycle_callbacks = []
-        for cid in cycle_inputs:
-            cb = CallbackBlueprint(Output(cid, "src"), Input(*cycle_inputs[cid]))
+        for cid_str, cid in cycle_inputs_ids.items():
+            cb = CallbackBlueprint(Output(cid, "src"), Input(*cycle_inputs[cid_str]))
             cb.f = f
             cycle_callbacks.append(cb)
         return callbacks, clientside_callbacks + cycle_callbacks
 
     @staticmethod
     def _cycle_break_id(d: DashDependency):
-        return f"{str(d).replace('.', '_')}_breaker"
+        if isinstance(d.component_id, dict):
+            comp_id = deepcopy(d.component_id)
+            comp_id['_breaker_prop'] = d.component_property
+            return comp_id
+        else:
+            return f"{str(d).replace('.', '_')}_breaker"
 
 
 class CycleBreakerInput(Input):
     def __init__(self, component_id, component_property):
         super().__init__(component_id, component_property)
+
+class ManualCycleBreaker(CycleBreaker):
+    def __init__(self, component_id, component_property):
+        super().__init__(CycleBreakerTransform._cycle_break_id(Input(component_id, component_property)))
 
 
 # endregion
